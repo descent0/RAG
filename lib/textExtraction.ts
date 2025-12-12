@@ -20,7 +20,7 @@ export async function extractTextFromPDF(buffer: Buffer): Promise<string> {
                 if (textItem.R) {
                   textItem.R.forEach((r: any) => {
                     if (r.T) {
-bro                       try {
+                      try {
                         text += decodeURIComponent(r.T) + ' ';
                       } catch (e) {
                         // If decoding fails, use raw text
