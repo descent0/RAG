@@ -28,7 +28,7 @@ export async function getEmbedding(text: string): Promise<number[]> {
   }
 
   const model = 'sentence-transformers/all-MiniLM-L6-v2';
-  const apiUrl = `https://api-inference.huggingface.co/pipeline/feature-extraction/${model}`;
+  const apiUrl = `https://router.huggingface.co/feature-extraction/${model}`;
 
   try {
     const response = await fetch(apiUrl, {
