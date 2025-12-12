@@ -96,7 +96,7 @@ Question: ${message}`;
     // Call Groq API
     const completion = await groq.chat.completions.create({
       messages: messages as any,
-      model: 'llama3-8b-8192', // Fast model (note: correct model name)
+      model: 'llama-3.1-8b-instant', // Fast model
       temperature: 0.7,
       max_tokens: 1024,
     });
