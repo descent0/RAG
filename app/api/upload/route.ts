@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { supabase } from '@/lib/supabase';
 import { extractText } from '@/lib/textExtraction';
 import { chunkText } from '@/lib/textChunking';
-import { getEmbeddings } from '@/lib/embeddings';
+import { getEmbedding } from '@/lib/embeddings';
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,19 +28,36 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // 🔍 STEP 0: CHECK IF DOCUMENT ALREADY EXISTS
+    const { data: existingDoc, error: fetchError } = await supabase
+      .from('documents')
+      .select('id, filename')
+      .eq('filename', filename)
+      .single();
+
+    if (existingDoc) {
+      return NextResponse.json({
+        success: true,
+        documentId: existingDoc.id,
+        filename: existingDoc.filename,
+        message: 'Document already exists. Skipping processing.',
+        skipped: true,
+      });
+    }
+
     // Convert file to buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    // Generate a unique document ID
+    // Generate a unique document ID (ONLY if not exists)
     const documentId = randomUUID();
-    
+
     // Determine content type
     const contentType = extension === 'pdf' ? 'pdf' : 'docx';
 
     // Step 1: Upload file to Supabase Storage
     const storagePath = `${documentId}/${filename}`;
-    const { data: uploadData, error: uploadError } = await supabase.storage
+    const { error: uploadError } = await supabase.storage
       .from('uploads')
       .upload(storagePath, buffer, {
         contentType: file.type,
@@ -55,13 +72,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get the public URL
-    const { data: urlData } = supabase.storage
-      .from('uploads')
-      .getPublicUrl(storagePath);
-
-    const fileUrl = urlData.publicUrl;
-
     // Step 2: Extract text from the document
     let extractedText: string;
     try {
@@ -69,7 +79,12 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       console.error('Text extraction error:', error);
       return NextResponse.json(
-        { success: false, error: `Failed to extract text: ${error instanceof Error ? error.message : 'Unknown error'}` },
+        {
+          success: false,
+          error: `Failed to extract text: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+        },
         { status: 500 }
       );
     }
@@ -95,70 +110,57 @@ export async function POST(request: NextRequest) {
     const chunkTexts = chunks.map(chunk => chunk.text);
     let embeddings: number[][];
     try {
-      embeddings = await getEmbeddings(chunkTexts);
+      embeddings = await getEmbedding(chunkTexts);
     } catch (error) {
       console.error('Embeddings error:', error);
       return NextResponse.json(
-        { success: false, error: `Failed to generate embeddings: ${error instanceof Error ? error.message : 'Unknown error'}` },
+        {
+          success: false,
+          error: `Failed to generate embeddings: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+        },
         { status: 500 }
       );
     }
 
-    // Step 5: Insert document entry in Supabase documents table first
-    try {
-      const { error: dbError } = await supabase
-        .from('documents')
-        .insert({
-          id: documentId,
-          filename: filename,
-          content_type: contentType,
-          storage_path: storagePath,
-        });
+    // Step 5: Insert document entry
+    const { error: dbError } = await supabase.from('documents').insert({
+      id: documentId,
+      filename,
+      content_type: contentType,
+      storage_path: storagePath,
+    });
 
-      if (dbError) {
-        console.error('Supabase insert error:', dbError);
-        return NextResponse.json(
-          { success: false, error: `Failed to save document metadata: ${dbError.message}` },
-          { status: 500 }
-        );
-      }
-    } catch (error) {
-      console.error('Database error:', error);
+    if (dbError) {
+      console.error('Supabase insert error:', dbError);
       return NextResponse.json(
-        { success: false, error: `Failed to save document metadata: ${error instanceof Error ? error.message : 'Unknown error'}` },
+        { success: false, error: `Failed to save document metadata: ${dbError.message}` },
         { status: 500 }
       );
     }
 
-    // Step 6: Store chunks with embeddings in Supabase document_chunks table
-    try {
-      const chunkRecords = chunks.map((chunk, i) => ({
-        document_id: documentId,
-        chunk_text: chunk.text,
-        embedding: embeddings[i],
-        chunk_index: chunk.index,
-      }));
+    // Step 6: Store chunks
+    const chunkRecords = chunks.map((chunk, i) => ({
+      document_id: documentId,
+      chunk_text: chunk.text,
+      embedding: embeddings[i],
+      chunk_index: chunk.index,
+    }));
 
-      const { error: chunksError } = await supabase
-        .from('document_chunks')
-        .insert(chunkRecords);
+    const { error: chunksError } = await supabase
+      .from('document_chunks')
+      .insert(chunkRecords);
 
-      if (chunksError) {
-        console.error('Supabase chunks insert error:', chunksError);
-        return NextResponse.json(
-          { success: false, error: `Failed to store chunks: ${chunksError.message}` },
-          { status: 500 }
-        );
-      }
-    } catch (error) {
-      console.error('Chunks storage error:', error);
+    if (chunksError) {
+      console.error('Supabase chunks insert error:', chunksError);
       return NextResponse.json(
-        { success: false, error: `Failed to store chunks: ${error instanceof Error ? error.message : 'Unknown error'}` },
+        { success: false, error: `Failed to store chunks: ${chunksError.message}` },
         { status: 500 }
       );
     }
 
-    // Return success response
+    // Success
     return NextResponse.json({
       success: true,
       documentId,
@@ -168,7 +170,12 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Upload API error:', error);
     return NextResponse.json(
-      { success: false, error: `Server error: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      {
+        success: false,
+        error: `Server error: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
+      },
       { status: 500 }
     );
   }

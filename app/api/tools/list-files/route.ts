@@ -5,8 +5,7 @@ export async function GET() {
   try {
     const { data, error } = await supabase
       .from('documents')
-      .select('id, filename')
-      .order('created_at', { ascending: false });
+      .select('id, filename');
 
     if (error) {
       console.error('Error fetching documents:', error);

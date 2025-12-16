@@ -24,6 +24,11 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const [documentId, setDocumentId] = useState<string | null>(null);
+
+
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -59,6 +64,11 @@ export default function Home() {
       const data = await response.json();
 
       if (data.success) {
+        setActiveDocumentId(data.documentId); 
+     
+  setDocumentId(data.documentId);
+
+
         setMessages(prev => [...prev, {
           role: 'assistant',
           content: `Perfect! I've processed "${file.name}". You can now ask me questions about it, or we can just chat normally. What would you like to do?`
@@ -97,10 +107,12 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          message: userMessage,
-          history: messages.slice(-10),
-        }),
+      body: JSON.stringify({
+  message: userMessage,
+  history: messages.slice(-10),
+  documentId, 
+}),
+
       });
 
       const data = await response.json();

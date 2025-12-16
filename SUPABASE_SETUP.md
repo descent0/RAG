@@ -5,14 +5,18 @@
 Run this SQL in your Supabase SQL Editor to create the similarity search function:
 
 ```sql
+-- Drop the existing function if it exists (with old signature)
+DROP FUNCTION IF EXISTS match_document_chunks(vector(768), double precision, integer, uuid);
+
 -- Create the similarity search function
 create or replace function match_document_chunks (
-  query_embedding vector(768),
+  query_embedding vector,
   match_threshold float default 0.7,
-  match_count int default 5
+  match_count int default 5,
+  doc_id uuid default null
 )
 returns table (
-  id uuid,
+  id bigint,
   document_id uuid,
   chunk_text text,
   chunk_index int,
@@ -31,6 +35,7 @@ as $$
   from document_chunks dc
   join documents d on d.id = dc.document_id
   where 1 - (dc.embedding <=> query_embedding) > match_threshold
+    and (doc_id is null or dc.document_id = doc_id)
   order by dc.embedding <=> query_embedding
   limit match_count;
 $$;

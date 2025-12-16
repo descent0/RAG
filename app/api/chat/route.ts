@@ -2,28 +2,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.GROQ_API_KEY!,
 });
 
-interface Message {
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  tool_calls?: any[];
-  tool_call_id?: string;
-}
+// ✅ BASE URL FIX
+const BASE_URL =
+  process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
 interface Source {
   filename: string;
   chunk_text: string;
 }
 
-// Define available tools
+// ---------------- TOOLS ----------------
+
 const tools = [
   {
     type: 'function',
     function: {
       name: 'list_available_files',
-      description: 'Get a list of all available PDF files that have been uploaded and can be queried. Use this when the user asks what files are available or what documents they can ask about.',
+      description: 'List all uploaded documents',
       parameters: {
         type: 'object',
         properties: {},
@@ -35,14 +33,11 @@ const tools = [
     type: 'function',
     function: {
       name: 'search_documents',
-      description: 'Search through uploaded PDF documents to find relevant information. Use this when the user asks questions about specific topics, needs information from documents, or wants to know about content in the PDFs.',
+      description: 'Search inside the currently active document',
       parameters: {
         type: 'object',
         properties: {
-          query: {
-            type: 'string',
-            description: 'The search query to find relevant information in the documents',
-          },
+          query: { type: 'string' },
         },
         required: ['query'],
       },
@@ -50,182 +45,158 @@ const tools = [
   },
 ];
 
-// Tool execution functions
+// ---------------- TOOL EXECUTORS ----------------
+
 async function listAvailableFiles() {
-  try {
-    const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/tools/list-files`);
-    const data = await response.json();
-    
-    if (data.success) {
-      const fileNames = data.documents.map((doc: any) => doc.filename).join(', ');
-      return fileNames || 'No files available yet.';
-    }
-    return 'No files available yet.';
-  } catch (error) {
-    return 'Error fetching files.';
-  }
+  const res = await fetch(`${BASE_URL}/api/tools/list-files`);
+  const data = await res.json();
+  return data?.documents?.map((d: any) => d.filename).join(', ') || 'No files';
 }
 
-async function searchDocuments(query: string) {
-  try {
-    const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/tools/search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-    });
-    
-    const data = await response.json();
-    
-    if (data.success && data.results.length > 0) {
-      const results = data.results.slice(0, 3).map((result: any) => {
-        const filename = result.documents?.filename || result.filename || 'unknown';
-        const text = result.chunk_text || '';
-        return `File: ${filename}\nContent: ${text}`;
-      }).join('\n\n---\n\n');
-      
-      return results;
-    }
-    return 'No relevant information found in the documents.';
-  } catch (error) {
-    return 'Error searching documents.';
+async function searchDocuments(query: string, documentId: string) {
+  console.log('Searching documents with query:', query, 'documentId:', documentId);
+  const res = await fetch(`${BASE_URL}/api/tools/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, documentId }),
+  });
+
+  const data = await res.json();
+  console.log('Search response data:', data);
+
+  if (!data.success || data.results.length === 0) {
+    console.log('No relevant information found - success:', data.success, 'results length:', data.results?.length);
+    return 'No relevant information was found in the uploaded document.';
   }
+
+  const results = data.results
+    .slice(0, 3)
+    .map(
+      (r: any) =>
+        `File: ${r.documents.filename}\nContent: ${r.chunk_text}`
+    )
+    .join('\n\n---\n\n');
+  console.log('Returning search results:', results);
+  return results;
 }
 
-export async function POST(request: NextRequest) {
-  try {
-    const { message, history = [] } = await request.json();
+// ---------------- CHAT HANDLER ----------------
 
-    if (!message || typeof message !== 'string') {
+export async function POST(req: NextRequest) {
+  try {
+    const { message, history = [], documentId } = await req.json();
+
+    if (!message || !documentId) {
       return NextResponse.json(
-        { success: false, error: 'Message is required' },
+        { success: false, error: 'message & documentId required' },
         { status: 400 }
       );
     }
 
-    // Prepare messages for Groq with tool calling support
+    // 🔒 SANITIZE HISTORY
+    const sanitizedHistory = history.map((m: any) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     const messages: any[] = [
       {
         role: 'system',
-        content: `You are a RAG assistant. 
-You MUST ALWAYS use the provided tools to answer factual questions about PDFs.
-NEVER answer from your own knowledge.
-If search_documents returns no result, ALWAYS reply:
-"No relevant information was found in the uploaded documents."
+        content: `
+You are a document-specific RAG assistant.
 
 Rules:
-- ONLY answer using retrieved chunk_text.
-- ALWAYS mention the filename.
-- If user asks anything about personal details like name, contact, etc., answer ONLY if found in documents.
-`,
+- ONLY use retrieved chunk_text
+- NEVER mix documents
+- ALWAYS mention filename
+- Always use the search_documents tool to answer questions about the document content.
+        `,
       },
-      ...history.map((msg: any) => ({
-        role: msg.role,
-        content: msg.content,
-        ...(msg.tool_calls && { tool_calls: msg.tool_calls }),
-        ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-      })),
-      {
-        role: 'user',
-        content: message,
-      },
+      ...sanitizedHistory,
+      { role: 'user', content: message },
     ];
 
-    // First API call - potentially with tool calls
+    // 🟢 FIRST CALL — tools enabled
     let completion = await groq.chat.completions.create({
-      messages: messages,
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.7,
-      max_tokens: 1024,
-      tools: tools as any,
-      tool_choice: 'required',
+      model: 'llama-3.1-8b-instant',
+      messages,
+      tools,
+      tool_choice: 'auto',
     });
 
-    let responseMessage = completion.choices[0]?.message;
-    const sources: Source[] = [];
-    let usedTools: string[] = [];
+    let response = completion.choices[0].message;
+    const toolsUsed: string[] = [];
 
-    // Handle tool calls if present
-    if (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0) {
-      messages.push(responseMessage);
+    // Handle malformed function calls
+    let toolCalls = response.tool_calls || [];
+    if (!toolCalls.length && response.content && response.content.includes('<function=')) {
+      const match = response.content.match(/<function=(\w+)>\{(.+)\}/);
+      if (match) {
+        const funcName = match[1];
+        const argsStr = match[2];
+        try {
+          const args = JSON.parse(`{${argsStr}}`);
+          toolCalls = [{
+            id: 'manual-' + Date.now(),
+            function: {
+              name: funcName,
+              arguments: JSON.stringify(args),
+            },
+            type: 'function',
+          }];
+          response.content = response.content.replace(/<function=.+>/, '').trim();
+        } catch (e) {
+          // Ignore parsing errors
+        }
+      }
+    }
 
-      // Execute all tool calls
-      for (const toolCall of responseMessage.tool_calls) {
-        const functionName = toolCall.function.name;
-        const functionArgs = JSON.parse(toolCall.function.arguments || '{}');
-        
-        usedTools.push(functionName);
-        let toolResult = '';
+    if (toolCalls.length) {
+      messages.push(response);
 
-        if (functionName === 'list_available_files') {
-          toolResult = await listAvailableFiles();
-        } else if (functionName === 'search_documents') {
-          const searchQuery = functionArgs.query;
-          toolResult = await searchDocuments(searchQuery);
-          
-          // Extract sources from search results
-          const searchResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/tools/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: searchQuery }),
-          });
-          
-          const searchData = await searchResponse.json();
-          if (searchData.success && searchData.results.length > 0) {
-            searchData.results.slice(0, 3).forEach((result: any) => {
-              const filename = result.documents?.filename || result.filename || 'unknown';
-              const chunkText = result.chunk_text || '';
-              if (chunkText && !sources.find(s => s.filename === filename)) {
-                sources.push({ filename, chunk_text: chunkText });
-              }
-            });
-          }
+      for (const call of toolCalls) {
+        const args = JSON.parse(call.function.arguments);
+        toolsUsed.push(call.function.name);
+
+        let result = '';
+
+        if (call.function.name === 'list_available_files') {
+          result = await listAvailableFiles();
         }
 
-        // Add tool response to messages
+        if (call.function.name === 'search_documents') {
+          // 🚨 documentId comes from backend, NOT model
+          console.log('Calling searchDocuments with query:', args.query, 'documentId:', documentId);
+          result = await searchDocuments(args.query, documentId);
+          console.log('Search result:', result);
+        }
+
         messages.push({
           role: 'tool',
-          tool_call_id: toolCall.id,
-          content: toolResult,
+          tool_call_id: call.id,
+          content: result,
         });
       }
 
-      // Make second API call with tool results
+      // 🔴 SECOND CALL — tools DISABLED (THIS FIXES YOUR ERROR)
       completion = await groq.chat.completions.create({
-        messages: messages,
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.7,
-        max_tokens: 1024,
+        model: 'llama-3.1-8b-instant',
+        messages,
+        tool_choice: 'none',
       });
 
-      responseMessage = completion.choices[0]?.message;
+      response = completion.choices[0].message;
     }
 
-    const assistantMessage = responseMessage?.content || 'No response generated';
-
-    if (usedTools.includes("search_documents") && sources.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: "No relevant information found in the uploaded documents.",
-        sources: [],
-        toolsUsed: usedTools,
-      });
-    }
-
-    // Always return a response at the end
     return NextResponse.json({
       success: true,
-      message: assistantMessage,
-      sources,
-      toolsUsed: usedTools,
+      message: response.content,
+      toolsUsed,
     });
-
-  } catch (error) {
-    console.error('Chat error:', error);
+  } catch (err: any) {
+    console.error(err);
     return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to process chat' 
-      },
+      { success: false, error: err.message },
       { status: 500 }
     );
   }
