@@ -9,13 +9,24 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@huggingface/inference": "^4.13.5",
+    "@pinecone-database/pinecone": "^6.1.3",
+    "@supabase/supabase-js": "^2.87.1",
+    "formidable": "^3.5.4",
+    "groq-sdk": "^0.37.0",
+    "langchain": "^1.1.5",
+    "langfuse": "^3.38.6",
+    "mammoth": "^1.11.0",
     "next": "16.0.10",
+    "pdf-parse": "^2.4.5",
+    "pinecone-client": "^2.0.0",
     "react": "19.2.1",
     "react-dom": "19.2.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
