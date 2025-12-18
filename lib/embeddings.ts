@@ -1,37 +1,24 @@
-// lib/embeddings.ts
-import { pipeline } from '@xenova/transformers';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-let embedder: any;
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-/**
- * Load embedding model once (singleton)
- */
-async function loadEmbedder() {
-  if (!embedder) {
-    embedder = await pipeline(
-      'feature-extraction',
-      'Xenova/all-MiniLM-L6-v2'
-    );
-  }
-  return embedder;
-}
+// Gemini embedding model (HTTP-based, no native binaries)
+const model = genAI.getGenerativeModel({
+  model: "text-embedding-004",
+});
 
 /**
  * Generate embeddings for text chunks
  */
-export async function getEmbedding (
+export async function getEmbedding(
   texts: string[]
 ): Promise<number[][]> {
-  const extractor = await loadEmbedder();
   const vectors: number[][] = [];
 
   for (const text of texts) {
-    const output = await extractor(text, {
-      pooling: 'mean',
-      normalize: true,
-    });
+    const result = await model.embedContent(text);
 
-    vectors.push(Array.from(output.data));
+    vectors.push(result.embedding.values);
   }
 
   return vectors;
