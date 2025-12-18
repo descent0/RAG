@@ -4,6 +4,8 @@ import { supabase } from '@/lib/supabase';
 import { extractText } from '@/lib/textExtraction';
 import { chunkText } from '@/lib/textChunking';
 import { getEmbeddings } from '@/lib/embeddings';
+export const runtime = 'nodejs';
+
 
 export async function POST(request: NextRequest) {
   try {
