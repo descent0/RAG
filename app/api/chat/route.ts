@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
+import { langfuse } from '@/lib/langfuse';
+import { getSystemPrompt } from '@/lib/systemPrompt';
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY!,
 });
 
-// ✅ BASE URL FIX
 const BASE_URL =
   process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
@@ -13,8 +14,6 @@ interface Source {
   filename: string;
   chunk_text: string;
 }
-
-// ---------------- TOOLS ----------------
 
 const tools = [
   {
@@ -45,7 +44,6 @@ const tools = [
   },
 ];
 
-// ---------------- TOOL EXECUTORS ----------------
 
 async function listAvailableFiles() {
   const res = await fetch(`${BASE_URL}/api/tools/list-files`);
@@ -80,9 +78,11 @@ async function searchDocuments(query: string, documentId: string) {
   return results;
 }
 
+
 // ---------------- CHAT HANDLER ----------------
 
 export async function POST(req: NextRequest) {
+  let trace: any = null;
   try {
     const { message, history = [], documentId } = await req.json();
 
@@ -93,7 +93,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 🔒 SANITIZE HISTORY
+    // Start Trace
+    trace = langfuse.trace({
+      name: "chat-request",
+      input: { userMessage: message },
+    });
+
+    // Attach System Prompt
+    const systemPrompt = await getSystemPrompt();
+    trace.span({
+      name: "system-prompt",
+      input: systemPrompt,
+    });
+
+    //  SANITIZE HISTORY
     const sanitizedHistory = history.map((m: any) => ({
       role: m.role,
       content: m.content,
@@ -102,19 +115,18 @@ export async function POST(req: NextRequest) {
     const messages: any[] = [
       {
         role: 'system',
-        content: `
-You are a document-specific RAG assistant.
-
-Rules:
-- ONLY use retrieved chunk_text
-- NEVER mix documents
-- ALWAYS mention filename
-- Always use the search_documents tool to answer questions about the document content.
-        `,
+        content: systemPrompt,
       },
       ...sanitizedHistory,
       { role: 'user', content: message },
     ];
+
+    // Trace the LLM Call
+    const generation = trace.generation({
+      name: "llm-decision",
+      model: "groq-llama",
+      input: messages,
+    });
 
     // 🟢 FIRST CALL — tools enabled
     let completion = await groq.chat.completions.create({
@@ -125,6 +137,11 @@ Rules:
     });
 
     let response = completion.choices[0].message;
+
+    generation.end({
+      output: response,
+    });
+
     const toolsUsed: string[] = [];
 
     // Handle malformed function calls
@@ -146,7 +163,6 @@ Rules:
           }];
           response.content = response.content.replace(/<function=.+>/, '').trim();
         } catch (e) {
-          // Ignore parsing errors
         }
       }
     }
@@ -158,17 +174,34 @@ Rules:
         const args = JSON.parse(call.function.arguments);
         toolsUsed.push(call.function.name);
 
+        // Trace tool selected
+        trace.span({
+          name: "tool-selected",
+          input: call.function.name,
+        });
+
         let result = '';
 
         if (call.function.name === 'list_available_files') {
           result = await listAvailableFiles();
+          trace.span({
+            name: "list-files",
+            output: result,
+          });
         }
 
         if (call.function.name === 'search_documents') {
-          // 🚨 documentId comes from backend, NOT model
+          const toolSpan = trace.span({
+            name: "search-documents",
+            input: args.query,
+          });
+          // documentId comes from backend, NOT model
           console.log('Calling searchDocuments with query:', args.query, 'documentId:', documentId);
           result = await searchDocuments(args.query, documentId);
           console.log('Search result:', result);
+          toolSpan.end({
+            output: result,
+          });
         }
 
         messages.push({
@@ -178,7 +211,6 @@ Rules:
         });
       }
 
-      // 🔴 SECOND CALL — tools DISABLED (THIS FIXES YOUR ERROR)
       completion = await groq.chat.completions.create({
         model: 'llama-3.1-8b-instant',
         messages,
@@ -186,6 +218,13 @@ Rules:
       });
 
       response = completion.choices[0].message;
+
+      // Final LLM Answer
+      trace.generation({
+        name: "final-answer",
+        input: messages,  
+        output: response.content,
+      });
     }
 
     return NextResponse.json({
